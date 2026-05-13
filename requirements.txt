@@ -1,0 +1,4 @@
+pyspark
+sqlalchemy
+dotenv
+pandas
