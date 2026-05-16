@@ -16,7 +16,11 @@ def create_spark_session():
     SparkSession: A SparkSession object.
     """
     section("Creating Spark Session")
-    spark = SparkSession.builder.appName("FibbieBankETL").getOrCreate()
+    spark = SparkSession.builder \
+        .appName("FibbieBankETL") \
+        .config("spark.hadoop.fs.file.impl", "org.apache.hadoop.fs.LocalFileSystem") \
+        .config("spark.hadoop.fs.permissions.umask-mode", "000") \
+        .getOrCreate()
     logging.info("Spark Session created successfully.")
     return spark
 
