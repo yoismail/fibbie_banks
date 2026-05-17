@@ -16,7 +16,18 @@ def create_spark_session():
     SparkSession: A SparkSession object.
     """
     section("Creating Spark Session")
-    spark = SparkSession.builder.appName("FibbieBankETL").getOrCreate()
+
+    spark = SparkSession.builder \
+        .appName("FibbieBanksETL") \
+        .config("spark.jars", "file:///C:/spark/jars/postgresql-42.7.4.jar") \
+        .config("spark.driver.memory", "14g") \
+        .config("spark.executor.memory", "14g") \
+        .config("spark.sql.shuffle.partitions", "64") \
+        .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+        .config("spark.kryoserializer.buffer.max", "1024m")  \
+        .config("spark.driver.host", "localhost") \
+        .config("spark.network.timeout", "600s") \
+        .getOrCreate()
 
     logging.info("Spark Session created successfully.")
     return spark

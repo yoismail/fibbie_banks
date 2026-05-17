@@ -2,3 +2,4 @@ pyspark
 sqlalchemy
 dotenv
 pandas
+psycopg2

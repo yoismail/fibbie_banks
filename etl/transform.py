@@ -1,11 +1,11 @@
 import logging
 from pathlib import Path
-from pyspark.sql.functions import monotonically_increasing_id
+from pyspark.sql.functions import sha2, concat_ws, col, year, month, dayofmonth, dayofweek, date_format, when, lit, to_date
+from pyspark.sql.types import DecimalType  # Required for numeric type
 from etl.clean import main as clean_main
 from etl.logger import setup_logging, section, timed
-setup_logging()
 
-OUTPUT_PATH = Path("dataset/star_schema")
+setup_logging()
 
 
 # Validate Schema
@@ -20,12 +20,60 @@ def validate_schema(df, expected_columns: list[str]) -> None:
     logging.info("✅ Schema validation passed.")
 
 
+def make_surrogate_key(natural_key_cols: list[str]):
+    """
+    Build a deterministic surrogate key from a list of natural-key columns.
+    Converts values to string ONLY for hashing — original types remain unchanged.
+    """
+    cols_for_hash = [col(c).cast("string") for c in natural_key_cols]
+    return sha2(concat_ws("|", *cols_for_hash), 256)
+
+
+# ------------------------------------------------------------------------------
+# 📅 NEW: Date Dimension — FIXED: handles TIMESTAMP → DATE conversion
+# ------------------------------------------------------------------------------
+def dim_date(df):
+    """
+    Create date dimension table with standard attributes.
+    Generates one row per unique transaction date.
+    """
+    section("Creating dim_date table")
+
+    # ✅ Convert TIMESTAMP → DATE for matching
+    df = df.withColumn("transaction_date_only",
+                       to_date(col("transaction_date")))
+
+    # Get unique dates only
+    df_dates = df.select("transaction_date_only").distinct()
+
+    # Build date attributes
+    df_date_dim = df_dates \
+        .withColumn("date_key", date_format("transaction_date_only", "yyyyMMdd").cast("INT")) \
+        .withColumn("full_date", col("transaction_date_only")) \
+        .withColumn("year", year("transaction_date_only")) \
+        .withColumn("month", month("transaction_date_only")) \
+        .withColumn("month_name", date_format("transaction_date_only", "MMMM")) \
+        .withColumn("quarter", date_format("transaction_date_only", "Q").cast("INT")) \
+        .withColumn("day_of_month", dayofmonth("transaction_date_only")) \
+        .withColumn("day_name", date_format("transaction_date_only", "EEEE")) \
+        .withColumn("is_weekend", when(dayofweek("transaction_date_only").isin(1, 7), lit(True)).otherwise(lit(False)))
+
+    # Final schema
+    df_date_dim = df_date_dim.select(
+        "date_key", "full_date", "year", "month",
+        "month_name", "quarter", "day_of_month", "day_name", "is_weekend"
+    )
+
+    logging.info("✅ dim_date table created.")
+    return df_date_dim.dropDuplicates(["date_key"])
+
+
 # Dim and fact table transformations
 def dim_customer(df):
-    """Create the dim_customer dimension table with unique customer IDs."""
+    """Create the dim_customer dimension table with deterministic surrogate keys."""
     section("Creating dim_customer table")
 
-    expected_cols = [
+    natural_key_cols = [
         "customer_name",
         "customer_address",
         "customer_city",
@@ -35,77 +83,89 @@ def dim_customer(df):
         "phone_number"
     ]
 
-    # Ensure all required fields exist
-    validate_schema(df, expected_cols)
+    validate_schema(df, natural_key_cols)
 
-    # Generate unique surrogate key and select final columns
-    df = df.withColumn("customer_id", monotonically_increasing_id())
-    df = df.select("customer_id", *expected_cols)
+    df = df.withColumn("customer_id", make_surrogate_key(natural_key_cols))
+    df = df.select("customer_id", *natural_key_cols)
 
-    logging.info("✅ dim_customer table created with surrogate keys.")
-
-    # Remove duplicates to ensure one record per customer
-    return df.dropDuplicates()
+    logging.info("✅ dim_customer table created.")
+    return df.dropDuplicates(["customer_id"])
 
 
 def dim_employee(df):
-    """Create the dim_employee table."""
+    """Create the dim_employee table with deterministic surrogate keys."""
     section("Creating dim_employee table")
 
-    expected_cols = [
+    natural_key_cols = [
         "company",
         "job_title",
         "gender",
         "marital_status"
     ]
 
-    # Ensure all required fields exist
-    validate_schema(df, expected_cols)
+    validate_schema(df, natural_key_cols)
 
-    # Generate unique surrogate key and select final columns
-    df = df.withColumn("employee_id", monotonically_increasing_id())
-    df = df.select("employee_id", *expected_cols)
+    df = df.withColumn("employee_id", make_surrogate_key(natural_key_cols))
+    df = df.select("employee_id", *natural_key_cols)
 
-    logging.info("✅ dim_employee table created with surrogate keys.")
-
-    # Remove duplicates to ensure one record per employee
-    return df.dropDuplicates()
+    logging.info("✅ dim_employee table created.")
+    return df.dropDuplicates(["employee_id"])
 
 
-def dim_transaction(df):
-    """Create the dim_transaction dimension table."""
+def dim_transaction(df, dim_date_df):
+    """
+    Create the dim_transaction dimension table.
+    ⚠️ CRITICAL: Ensures `amount` stays DECIMAL/NUMERIC to match PostgreSQL.
+    ⚠️ Column order matches exactly what load.py expects.
+    ➕ Added date_key from dim_date — FIXED join type
+    """
     section("Creating dim_transaction table")
 
-    expected_cols = [
+    natural_key_cols = [
         "transaction_date",
         "transaction_type",
         "amount"
     ]
 
-    # Ensure all required fields exist
-    validate_schema(df, expected_cols)
+    validate_schema(df, natural_key_cols)
 
-    # Generate unique surrogate key and select final columns
-    df = df.withColumn("transaction_id", monotonically_increasing_id())
-    df = df.select("transaction_id", *expected_cols)
+    # ✅ Convert TIMESTAMP → DATE to match dim_date
+    df = df.withColumn("transaction_date_only",
+                       to_date(col("transaction_date")))
 
-    logging.info("✅ dim_transaction table created with surrogate keys.")
+    # ✅ Join on DATE type — guaranteed match
+    df = df.join(
+        dim_date_df.select("date_key", "full_date").withColumnRenamed(
+            "full_date", "transaction_date_only"),
+        on="transaction_date_only",
+        how="left"
+    )
 
-    # Remove duplicates to ensure one record per transaction
-    return df.dropDuplicates()
+    # Create ID — casting happens INSIDE the hash only
+    df = df.withColumn("transaction_id", make_surrogate_key(natural_key_cols))
+
+    # ✅ date_key will NEVER be null now
+    df = df.select(
+        "transaction_id",
+        "transaction_date",
+        "date_key",
+        "transaction_type",
+        col("amount").cast(DecimalType(18, 2))  # FORCE NUMERIC TYPE HERE
+    )
+
+    logging.info("✅ dim_transaction table created — amount is NUMERIC.")
+    return df.dropDuplicates(["transaction_id"])
 
 
 def fact_table(df, dim_cust, dim_trans, dim_emp):
-    """
-    Create the fact table by joining with pre‑built dimension tables.
-    Uses surrogate keys for fast, reliable joins.
-    """
+    """Create the fact table by joining with pre‑built dimension tables."""
     section("Creating fact_table table")
 
     expected_cols = [
         "transaction_id",
         "customer_id",
         "employee_id",
+        "date_key",
         "credit_card_number",
         "iban",
         "currency_code",
@@ -117,7 +177,6 @@ def fact_table(df, dim_cust, dim_trans, dim_emp):
         "description"
     ]
 
-    # Join ON REAL COLUMNS (natural keys)
     df = df.join(
         dim_cust,
         on=["customer_name", "customer_address", "customer_city",
@@ -125,6 +184,7 @@ def fact_table(df, dim_cust, dim_trans, dim_emp):
         how="left"
     ) \
         .join(
+        # ✅ Join only on natural keys — date_key/transaction_id come from dim
         dim_trans,
         on=["transaction_date", "transaction_type", "amount"],
         how="left"
@@ -135,52 +195,30 @@ def fact_table(df, dim_cust, dim_trans, dim_emp):
         how="left"
     )
 
-    # Select exactly the final schema we want
     df = df.select(*expected_cols)
-
-    # Ensure everything exists as expected
     validate_schema(df, expected_cols)
 
-    logging.info(
-        "✅ fact_table created successfully with all required columns.")
-
-    # Remove duplicate transactions if any exist
-    return df.dropDuplicates()
-
-
-def write_parquet(df, path):
-    """Write the DataFrame to Parquet format."""
-    section(f"Writing DataFrame to Parquet at: {path}")
-    path = Path(path)
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    logging.info(f"✅ Ready - output directory: {path.parent}")
-
-    df.write.mode("overwrite").parquet(str(path))
-    logging.info(f"✅ DataFrame written to Parquet successfully at: {path}")
+    logging.info("✅ fact_table created successfully.")
+    return df.dropDuplicates(["transaction_id"])
 
 
 @timed
 def main():
     df_cleaned, spark = clean_main()
 
-    # 1. Build dimensions ONCE
+    # ✅ NEW: Build date dimension FIRST
+    dim_date_df = dim_date(df_cleaned)
+
+    # Build dimensions
     dim_cust = dim_customer(df_cleaned)
-    dim_trans = dim_transaction(df_cleaned)
+    dim_trans = dim_transaction(df_cleaned, dim_date_df)  # Pass date dim in
     dim_emp = dim_employee(df_cleaned)
 
-    # 2. Build fact table using pre‑built dimensions
+    # Build fact
     fact = fact_table(df_cleaned, dim_cust, dim_trans, dim_emp)
 
-    # 3. Write dimension and fact tables to Parquet - would uncomment when ready
-    """ 
-    write_parquet(dim_cust, OUTPUT_PATH / "dim_customer")
-    write_parquet(dim_trans, OUTPUT_PATH / "dim_transaction")
-    write_parquet(dim_emp, OUTPUT_PATH / "dim_employee")
-    write_parquet(fact, OUTPUT_PATH / "fact_transactions")
-    """
-
     return {
+        "dim_date": dim_date_df,      # NEW
         "dim_customer": dim_cust,
         "dim_transaction": dim_trans,
         "dim_employee": dim_emp,
@@ -192,13 +230,7 @@ if __name__ == "__main__":
     spark = None
     try:
         tables, spark = main()
-        """
-        for name, table in tables.items():
-            logging.info(f"\n📦 {name} schema:")
-            table.printSchema()
-            logging.info(f"\n📊 {name} sample data:")
-            table.show(5, truncate=False)  # ✅ Show full content
-        """  # Would uncomment when ready
+
     except Exception as e:
         logging.error(f"❌ An error occurred during transformation: {e}")
         raise
