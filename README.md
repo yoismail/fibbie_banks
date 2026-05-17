@@ -1,5 +1,4 @@
 ---
-
 # 🏦 FIBBIEBANKS CASE STUDY — A 1M‑Row PySpark ETL Pipeline & Star Schema Warehouse  
 *A production‑grade distributed ETL system I designed and built using PySpark, PostgreSQL, and SQLAlchemy, processing 1 million synthetic banking transactions into a fully‑validated dimensional warehouse.*
 
