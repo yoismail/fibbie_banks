@@ -60,13 +60,13 @@ CREATE TABLE IF NOT EXISTS analytics.fact_transactions (
     date_key         INT NOT NULL REFERENCES analytics.dim_date(date_key),
 
     -- Transaction attributes
-    credit_card_number NUMERIC(50),   -- ✅ Changed from NUMERIC → VARCHAR to support masked/long values
+    credit_card_number NUMERIC(50),   
     iban               VARCHAR(80),
     currency_code     VARCHAR(10),
     random_number     NUMERIC(18,4),
     category          VARCHAR(100),
     "group"           VARCHAR(100),  -- quoted because GROUP is reserved word
-    is_active         VARCHAR(10),        -- ✅ Changed from VARCHAR → BOOLEAN (cleaner type)
+    is_active         VARCHAR(10),        
     last_updated      TIMESTAMP,
     description       TEXT
 );
