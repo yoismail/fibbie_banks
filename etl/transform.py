@@ -29,9 +29,8 @@ def make_surrogate_key(natural_key_cols: list[str]):
     return sha2(concat_ws("|", *cols_for_hash), 256)
 
 
-# ------------------------------------------------------------------------------
-# 📅 NEW: Date Dimension — FIXED: handles TIMESTAMP → DATE conversion
-# ------------------------------------------------------------------------------
+# Date Dimension: handles TIMESTAMP → DATE conversion
+
 def dim_date(df):
     """
     Create date dimension table with standard attributes.
